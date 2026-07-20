@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "common_paper_workload": {
+    "start_block": 0,
+    "end_block": 10000000,
+    "reported_window": [5000000, 10000000],
+    "input": "canonical Ethereum mainnet blocks materialized in MariaDB"
+  },
+  "cases": [
+    {"id":"E1_H","experiment":"E1","kind":"replay","purpose":"performance","validation":true,"variant":"fast","scheme":"H","state_mode":"archive","backend":"leveldb","compression":"snappy"},
+    {"id":"E1_P","experiment":"E1","kind":"replay","purpose":"performance","validation":true,"variant":"fast","scheme":"P","state_mode":"non-archive","backend":"leveldb","compression":"snappy","pathdb_history":true},
+    {"id":"E1_PH","experiment":"E1","kind":"replay","purpose":"performance","validation":true,"variant":"fast","scheme":"PH","state_mode":"archive","backend":"leveldb","compression":"snappy"},
+    {"id":"E1_PV","experiment":"E1","kind":"replay","purpose":"performance","validation":true,"variant":"fast","scheme":"PV","state_mode":"archive","backend":"leveldb","compression":"snappy"},
+    {"id":"E1_PVstar","experiment":"E1","kind":"replay","purpose":"performance","validation":true,"variant":"fast","scheme":"PVstar","state_mode":"archive","backend":"leveldb","compression":"snappy"},
+    {"id":"E1_VH","experiment":"E1","kind":"replay","purpose":"performance","validation":true,"variant":"fast","scheme":"VH","state_mode":"archive","backend":"leveldb","compression":"snappy"},
+    {"id":"E1_VP","experiment":"E1","kind":"replay","purpose":"performance","validation":true,"variant":"fast","scheme":"VP","state_mode":"archive","backend":"leveldb","compression":"snappy"},
+    {"id":"E1_VPstar","experiment":"E1","kind":"replay","purpose":"performance","validation":true,"variant":"fast","scheme":"VPstar","state_mode":"archive","backend":"leveldb","compression":"snappy"},
+
+    {"id":"E1_H_stats","experiment":"E1","kind":"replay","purpose":"leveldb-metrics","validation":true,"variant":"stats","scheme":"H","state_mode":"archive","backend":"leveldb","compression":"snappy"},
+    {"id":"E1_P_stats","experiment":"E1","kind":"replay","purpose":"leveldb-metrics","validation":true,"variant":"stats","scheme":"P","state_mode":"non-archive","backend":"leveldb","compression":"snappy","pathdb_history":true},
+    {"id":"E1_PH_stats","experiment":"E1","kind":"replay","purpose":"leveldb-metrics","validation":true,"variant":"stats","scheme":"PH","state_mode":"archive","backend":"leveldb","compression":"snappy"},
+    {"id":"E1_PV_stats","experiment":"E1","kind":"replay","purpose":"leveldb-metrics","validation":true,"variant":"stats","scheme":"PV","state_mode":"archive","backend":"leveldb","compression":"snappy"},
+    {"id":"E1_PVstar_stats","experiment":"E1","kind":"replay","purpose":"leveldb-metrics","validation":true,"variant":"stats","scheme":"PVstar","state_mode":"archive","backend":"leveldb","compression":"snappy"},
+    {"id":"E1_VH_stats","experiment":"E1","kind":"replay","purpose":"leveldb-metrics","validation":true,"variant":"stats","scheme":"VH","state_mode":"archive","backend":"leveldb","compression":"snappy"},
+    {"id":"E1_VP_stats","experiment":"E1","kind":"replay","purpose":"leveldb-metrics","validation":true,"variant":"stats","scheme":"VP","state_mode":"archive","backend":"leveldb","compression":"snappy"},
+    {"id":"E1_VPstar_stats","experiment":"E1","kind":"replay","purpose":"leveldb-metrics","validation":true,"variant":"stats","scheme":"VPstar","state_mode":"archive","backend":"leveldb","compression":"snappy"},
+
+    {"id":"E2_random_keys","experiment":"E2","kind":"database-rewrite","purpose":"compression-source","validation":true,"source_case":"E1_PVstar","random_keys":true,"random_values":false},
+    {"id":"E2_random_values","experiment":"E2","kind":"database-rewrite","purpose":"compression-source","validation":true,"source_case":"E1_PVstar","random_keys":false,"random_values":true},
+    {"id":"E2_random_keys_values","experiment":"E2","kind":"database-rewrite","purpose":"compression-source","validation":true,"source_case":"E1_PVstar","random_keys":true,"random_values":true},
+
+    {"id":"E3_PVstar_myhash","experiment":"E3","kind":"replay","purpose":"myhash","validation":true,"variant":"fast","scheme":"PVstar","state_mode":"archive","backend":"leveldb","compression":"snappy","myhash":true,"myhash_cache_mb":0},
+    {"id":"E3_VPstar_myhash","experiment":"E3","kind":"replay","purpose":"myhash","validation":true,"variant":"fast","scheme":"VPstar","state_mode":"archive","backend":"leveldb","compression":"snappy","myhash":true,"myhash_cache_mb":0},
+    {"id":"E3_PVstar_myhash_cache4g_unified","experiment":"E3","kind":"replay","purpose":"myhash-cache","validation":true,"variant":"fast","scheme":"PVstar","state_mode":"archive","backend":"leveldb","compression":"snappy","myhash":true,"myhash_cache_mb":4096,"myhash_cache_mode":"unified"},
+    {"id":"E3_VPstar_myhash_cache4g_unified","experiment":"E3","kind":"replay","purpose":"myhash-cache","validation":true,"variant":"fast","scheme":"VPstar","state_mode":"archive","backend":"leveldb","compression":"snappy","myhash":true,"myhash_cache_mb":4096,"myhash_cache_mode":"unified"},
+    {"id":"E3_PVstar_myhash_cache4g_split","experiment":"E3","kind":"replay","purpose":"myhash-cache-layout-sensitivity","validation":true,"variant":"fast","scheme":"PVstar","state_mode":"archive","backend":"leveldb","compression":"snappy","myhash":true,"myhash_cache_mb":4096,"myhash_cache_mode":"split"},
+    {"id":"E3_VPstar_myhash_cache4g_split","experiment":"E3","kind":"replay","purpose":"myhash-cache-layout-sensitivity","validation":true,"variant":"fast","scheme":"VPstar","state_mode":"archive","backend":"leveldb","compression":"snappy","myhash":true,"myhash_cache_mb":4096,"myhash_cache_mode":"split"},
+    {"id":"E3_PVstar_myhash_cache8g","experiment":"E3","kind":"replay","purpose":"supplementary-cache-sensitivity","validation":true,"variant":"fast","scheme":"PVstar","state_mode":"archive","backend":"leveldb","compression":"snappy","myhash":true,"myhash_cache_mb":8192,"myhash_cache_mode":"unified"},
+    {"id":"E3_VPstar_myhash_cache8g","experiment":"E3","kind":"replay","purpose":"supplementary-cache-sensitivity","validation":true,"variant":"fast","scheme":"VPstar","state_mode":"archive","backend":"leveldb","compression":"snappy","myhash":true,"myhash_cache_mb":8192,"myhash_cache_mode":"unified"},
+
+    {"id":"E4_PVstar_padding","experiment":"E4","kind":"replay","purpose":"decoupled-auth-approximation","validation":true,"variant":"fast","scheme":"PVstar","state_mode":"archive","backend":"leveldb","compression":"none","disk_size_multiplier":1.125},
+    {"id":"E4_VPstar_padding","experiment":"E4","kind":"replay","purpose":"decoupled-auth-approximation","validation":true,"variant":"fast","scheme":"VPstar","state_mode":"archive","backend":"leveldb","compression":"none","disk_size_multiplier":1.125},
+
+    {"id":"E5_VH_20bit","experiment":"E5","kind":"replay","purpose":"version-size","validation":true,"variant":"fast","scheme":"VH","state_mode":"archive","backend":"leveldb","compression":"snappy","version_wrap":"0xfffff"},
+    {"id":"E5_VH_16bit","experiment":"E5","kind":"replay","purpose":"version-size","validation":true,"variant":"fast","scheme":"VH","state_mode":"archive","backend":"leveldb","compression":"snappy","version_wrap":"0xffff"},
+
+    {"id":"E6_H_pebble_snappy","experiment":"E6","kind":"replay","purpose":"backend-portability","validation":true,"variant":"fast","scheme":"H","state_mode":"archive","backend":"pebbledb","compression":"snappy"},
+    {"id":"E6_H_pebble_zstd","experiment":"E6","kind":"replay","purpose":"backend-portability","validation":true,"variant":"fast","scheme":"H","state_mode":"archive","backend":"pebbledb","compression":"zstd"},
+    {"id":"E6_PVstar_pebble_snappy","experiment":"E6","kind":"replay","purpose":"backend-portability","validation":true,"variant":"fast","scheme":"PVstar","state_mode":"archive","backend":"pebbledb","compression":"snappy"},
+    {"id":"E6_PVstar_pebble_zstd","experiment":"E6","kind":"replay","purpose":"backend-portability","validation":true,"variant":"fast","scheme":"PVstar","state_mode":"archive","backend":"pebbledb","compression":"zstd"},
+    {"id":"E6_VPstar_pebble_snappy","experiment":"E6","kind":"replay","purpose":"backend-portability","validation":true,"variant":"fast","scheme":"VPstar","state_mode":"archive","backend":"pebbledb","compression":"snappy"},
+    {"id":"E6_VPstar_pebble_zstd","experiment":"E6","kind":"replay","purpose":"backend-portability","validation":true,"variant":"fast","scheme":"VPstar","state_mode":"archive","backend":"pebbledb","compression":"zstd"},
+
+    {"id":"E7_H_nonarchive","experiment":"E7","kind":"replay","purpose":"non-archive","validation":true,"variant":"fast","scheme":"H","state_mode":"non-archive","backend":"leveldb","compression":"snappy"},
+    {"id":"E7_PVstar_nonarchive","experiment":"E7","kind":"replay","purpose":"non-archive","validation":true,"variant":"fast","scheme":"PVstar","state_mode":"non-archive","backend":"leveldb","compression":"snappy"},
+    {"id":"E7_VPstar_nonarchive","experiment":"E7","kind":"replay","purpose":"non-archive","validation":true,"variant":"fast","scheme":"VPstar","state_mode":"non-archive","backend":"leveldb","compression":"snappy"}
+  ]
+}

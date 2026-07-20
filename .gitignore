@@ -1,0 +1,12 @@
+/bin/
+/logs/
+/runtime/
+/sources/
+/__pycache__/
+**/__pycache__/
+*.pyc
+
+# Local manuscript drafts are used to build the coverage matrix but are not
+# part of the executable artifact.
+/_VLDB_2027_*.pdf
+/*.xlsx
