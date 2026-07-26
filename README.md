@@ -14,7 +14,7 @@ Reduced runs are functional checks. The paper reports trends over blocks
 | Quick check | 0–100K | Build, prepare the shared 1M input, replay H, and validate output | About 5–10 minutes |
 | Stats smoke | 0–500K | Run H, PV*, and VP* with detailed LevelDB instrumentation | About 30 minutes after input preparation |
 | Extended stats | 0–1M | Exercise the wider read-stat counter set | About 65 minutes after input preparation |
-| E1–E7 validation | 0–50K | Check every experiment configuration with real transactions | About 65 minutes when tested at 100K |
+| E1–E7 validation | 0–50K | Check every experiment configuration with real transactions | About 30 minutes |
 | E1–E7 paper | 0–10M | Reproduce the paper-scale experiments | Several days per case |
 
 Measured times are host and storage dependent and are not pass/fail criteria.
@@ -138,8 +138,8 @@ TARGET_BLOCK="$TARGET_500K_BLOCK" TARGET_HASH="$TARGET_500K_HASH" \
 If a requested target is larger than 1M, such as the paper-scale 10M endpoint,
 input preparation automatically raises the acquisition range to that target.
 
-On the validation host, ERA download plus import took about two minutes through
-500K. Network and storage conditions can change this time.
+On the validation host, ERA download, import, and verification took about four
+minutes through 1M. Network and storage conditions can change this time.
 
 ## MariaDB input cache
 
