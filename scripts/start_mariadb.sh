@@ -9,7 +9,9 @@ require_command mariadbd
 
 MARIADB_RUNTIME="$RUNTIME_DIR/mariadb"
 MARIADB_DATADIR="$MARIADB_RUNTIME/data"
-MARIADB_SOCKET="$MARIADB_RUNTIME/mariadb.sock"
+# Keep the Unix socket close to the runtime root. Unix-domain socket paths are
+# limited to 107 bytes on Linux, and artifact clones often have long paths.
+MARIADB_SOCKET="$RUNTIME_DIR/mariadb.sock"
 MARIADB_PIDFILE="$MARIADB_RUNTIME/mariadb.pid"
 MARIADB_LOG="$LOG_DIR/mariadb.log"
 MARIADB_TMP="$MARIADB_RUNTIME/tmp"
