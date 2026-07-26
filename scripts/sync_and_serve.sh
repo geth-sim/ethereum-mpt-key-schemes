@@ -13,6 +13,7 @@ rm -f "$RPC_READY_FILE"
 echo "Starting offline HTTP RPC at $RPC_URL"
 "$BIN_DIR/geth" \
   --datadir "$GETH_DATADIR" \
+  --ipcdisable \
   --http \
   --http.addr "$GETH_RPC_HOST" \
   --http.port "$GETH_RPC_PORT" \

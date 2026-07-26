@@ -63,6 +63,7 @@ verify_datadir() {
   rm -f "$RPC_READY_FILE"
   "$BIN_DIR/geth" \
     --datadir "$datadir" \
+    --ipcdisable \
     --http \
     --http.addr "$GETH_RPC_HOST" \
     --http.port "$GETH_RPC_PORT" \
@@ -175,6 +176,7 @@ acquire_with_target_sync() {
 
   "$BIN_DIR/geth" \
     --datadir "$target_sync_tmp" \
+    --ipcdisable \
     --syncmode full \
     --exitwhensynced \
     --http \
