@@ -23,7 +23,7 @@ Measured times are host and storage dependent and are not pass/fail criteria.
 
 Tested environment:
 
-- Linux x86-64
+- Ubuntu 22.04 LTS, x86-64
 - at least 8 GB RAM for the quick check
 - at least 16 GB RAM for the reduced multi-case runs
 - Go with automatic toolchain selection support
