@@ -11,7 +11,7 @@ Reduced runs are functional checks. The paper reports trends over blocks
 
 | Profile | Range | Purpose | Reference time |
 |---|---:|---|---:|
-| Quick check | 0–100K | Build, acquire input, replay H, and validate output | About 5 minutes |
+| Quick check | 0–100K | Build, prepare the shared 1M input, replay H, and validate output | About 5–10 minutes |
 | Stats smoke | 0–500K | Run H, PV*, and VP* with detailed LevelDB instrumentation | About 30 minutes after input preparation |
 | Extended stats | 0–1M | Exercise the wider read-stat counter set | About 65 minutes after input preparation |
 | E1–E7 validation | 0–50K | Check every experiment configuration with real transactions | About 65 minutes when tested at 100K |
@@ -29,7 +29,8 @@ Tested environment:
 - Go with automatic toolchain selection support
 - Python 3.10 or later
 - Git, GNU Make, a C compiler, `curl`, and `jq`
-- outbound Ethereum P2P access
+- outbound HTTPS access; outbound Ethereum P2P access is used only by the
+  fallback input method
 - an open-file limit above 1,000
 - MariaDB 10.10+ and PyMySQL for stats and E1–E7 runs
 - about 5 GB free space for the quick check, 20 GB for the 1M stats smoke,
@@ -64,9 +65,10 @@ From the repository root:
 ./scripts/reproduce.sh
 ```
 
-This command builds every dependency, target-syncs mainnet through block
-100,000, starts a local RPC and simulator, replays H from genesis, and validates
-the result structure.
+This command builds every dependency, downloads and imports a checksum-verified
+Ethereum mainnet ERA prefix through block 1M, starts a local RPC and simulator,
+replays H from genesis through block 100K, and validates the result structure.
+The prepared 1M input is reused by all reduced profiles.
 
 Success ends with:
 
@@ -85,31 +87,47 @@ runtime/quick-summary.json
 runtime/phase-timings.json
 runtime/simulator-db/
 runtime/simulator/logFiles/evm/runs/H_archive_leveldb_snappy_fast/
-logs/geth-target-sync.log
+logs/era-download.log
+logs/era-import.log
 logs/simulator.console.log
 ```
 
-## Preparing larger input ranges
+## Input preparation and replay ranges
 
-The same geth datadir can be extended incrementally:
-
-```text
-100K → 500K → 1M → 10M
-```
-
-Previously downloaded blocks are reused. Stop the current offline RPC before
-requesting a higher target, then run the sync command with the new block/hash.
-A datadir already synced beyond the requested target can also serve any
-smaller pinned prefix.
-
-If the quick check has not already built the binaries, run:
+Prepare the shared input without starting a long-lived RPC:
 
 ```bash
 ./scripts/build.sh
+./scripts/prepare_input.sh
 ```
 
-For example, extend the quick-check datadir to 500K and keep the resulting RPC
-terminal open:
+For every requested target up to 1M, this prepares blocks 0–1M once. Clients
+then select only the range needed by their profile:
+
+```text
+quick check       0–100K
+stats smoke       0–500K
+extended stats    0–1M
+E1–E7 validation  0–50K
+```
+
+Input acquisition uses these deterministic stages:
+
+```text
+checksum-verified ERA download and import
+  → retry the configured ERA endpoint(s)
+  → P2P target sync fallback
+  → pinned genesis and acquisition-target hash verification
+```
+
+ERA and fallback settings are in `config.env`. To disable the P2P fallback:
+
+```bash
+INPUT_ACQUISITION_FALLBACK=none ./scripts/prepare_input.sh
+```
+
+Start an offline RPC for any supported replay endpoint. The underlying 1M
+input is reused:
 
 ```bash
 source config.env
@@ -117,27 +135,11 @@ TARGET_BLOCK="$TARGET_500K_BLOCK" TARGET_HASH="$TARGET_500K_HASH" \
   ./scripts/sync_and_serve.sh
 ```
 
-For 1M:
+If a requested target is larger than 1M, such as the paper-scale 10M endpoint,
+input preparation automatically raises the acquisition range to that target.
 
-```bash
-source config.env
-TARGET_BLOCK="$TARGET_1M_BLOCK" TARGET_HASH="$TARGET_1M_HASH" \
-  ./scripts/sync_and_serve.sh
-```
-
-For the paper range:
-
-```bash
-source config.env
-TARGET_BLOCK="$TARGET_10M_BLOCK" TARGET_HASH="$TARGET_10M_HASH" \
-  ./scripts/sync_and_serve.sh
-```
-
-The measured cold acquisition times on the reference host were approximately
-103 seconds through 100K and 903 seconds through 1M. Peer discovery and network
-conditions can change these times substantially. The default remains 100K so a
-reviewer running only the quick check does not need to download the full 1M
-prefix.
+On the validation host, ERA download plus import took about two minutes through
+500K. Network and storage conditions can change this time.
 
 ## MariaDB input cache
 
@@ -148,20 +150,18 @@ transactions. Start the artifact-local server in a separate terminal:
 ./scripts/start_mariadb.sh
 ```
 
-With the matching geth RPC still open, import the range. For the default 500K
-stats smoke:
+With the matching geth RPC still open, import 1M once so every reduced profile
+can select its own prefix:
 
 ```bash
 source config.env
-TARGET_BLOCK="$TARGET_500K_BLOCK" TARGET_HASH="$TARGET_500K_HASH" \
+TARGET_BLOCK="$TARGET_1M_BLOCK" TARGET_HASH="$TARGET_1M_HASH" \
   ./scripts/import_mariadb.sh
 ```
 
-The importer is resumable. If MariaDB already contains 0–100K, a 500K import
-starts at block 100,001. Extending it later to 1M starts at block 500,001.
-
-Use the corresponding `TARGET_1M_*` or `TARGET_10M_*` variables when extending
-the input.
+The importer is resumable. A smaller import may still be requested with the
+matching `TARGET_100K_*` or `TARGET_500K_*` values, and a later 1M import starts
+after the last stored block. Use `TARGET_10M_*` for paper-scale input.
 
 ## Stats smoke
 
@@ -187,7 +187,7 @@ runtime/core-smoke-500000/
 └── smoke-report.json
 ```
 
-To run the optional 1M version after extending geth and MariaDB:
+To run the optional 1M version after importing MariaDB through 1M:
 
 ```bash
 source config.env
@@ -364,7 +364,8 @@ runtime/.../logFiles/evm/runs/<experiment-id>/
 The simulator database is separate from the input geth datadir:
 
 ```text
-runtime/geth/                 canonical Ethereum input
+runtime/geth/                 canonical Ethereum input (1M by default)
+runtime/input-acquisition/    temporary ERA or P2P fallback work
 runtime/simulator-db/         quick-check replay state
 runtime/core-smoke-*/databases/
 runtime/paper-experiments/*/*/*/database/
@@ -388,12 +389,21 @@ bytecode:
 ./scripts/clean_all_generated.sh
 ```
 
-The next `./scripts/reproduce.sh` clones and rebuilds every dependency.
+The next `./scripts/reproduce.sh` clones, rebuilds, reacquires input, and
+replays from scratch.
 
 ## Troubleshooting
 
-If target sync cannot find peers, confirm that outbound Ethereum TCP/UDP
-traffic is allowed and inspect:
+If ERA input preparation fails, inspect:
+
+```bash
+tail -n 100 logs/era-download.log
+tail -n 100 logs/era-import.log
+tail -n 100 logs/era-verify.log
+```
+
+The script then tries the configured P2P fallback. If that also fails, confirm
+that outbound Ethereum TCP/UDP traffic is allowed and inspect:
 
 ```bash
 tail -n 100 logs/geth-target-sync.log

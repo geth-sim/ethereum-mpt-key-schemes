@@ -24,21 +24,20 @@ phase_started="$workflow_started"
 phase_finished="$(now_ns)"
 build_ms="$(elapsed_ms "$phase_started" "$phase_finished")"
 
-sync_marker="$GETH_DATADIR/.synced-$TARGET_BLOCK-$TARGET_HASH"
-target_sync_reused=false
-if [[ -f "$sync_marker" ]]; then
-  target_sync_reused=true
-else
-  for marker in "$GETH_DATADIR"/.synced-*; do
-    [[ -f "$marker" ]] || continue
-    marker_name="${marker##*/.synced-}"
-    marker_block="${marker_name%%-*}"
-    if [[ "$marker_block" =~ ^[0-9]+$ ]] && ((marker_block >= TARGET_BLOCK)); then
-      target_sync_reused=true
-      break
-    fi
-  done
+acquisition_block="$INPUT_TARGET_BLOCK"
+if ((TARGET_BLOCK > acquisition_block)); then
+  acquisition_block="$TARGET_BLOCK"
 fi
+input_reused=false
+for marker in "$GETH_DATADIR"/.input-ready-*; do
+  [[ -f "$marker" ]] || continue
+  marker_name="${marker##*/.input-ready-}"
+  marker_block="${marker_name%%-*}"
+  if [[ "$marker_block" =~ ^[0-9]+$ ]] && ((marker_block >= acquisition_block)); then
+    input_reused=true
+    break
+  fi
+done
 
 rpc_pid=""
 simulator_pid=""
@@ -54,7 +53,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-echo "Starting target sync / RPC service"
+echo "Preparing canonical input and starting RPC service"
 phase_started="$(now_ns)"
 rm -f "$RPC_READY_FILE"
 "$ROOT_DIR/scripts/sync_and_serve.sh" >"$LOG_DIR/sync-and-rpc.console.log" 2>&1 &
@@ -74,6 +73,7 @@ done
 [[ "$rpc_ready" == true ]] || die "RPC did not become ready; see $LOG_DIR/sync-and-rpc.console.log"
 phase_finished="$(now_ns)"
 data_and_rpc_ms="$(elapsed_ms "$phase_started" "$phase_finished")"
+input_method="$(<"$GETH_DATADIR/.input-method")"
 
 echo "Starting simulator"
 phase_started="$(now_ns)"
@@ -99,8 +99,10 @@ total_ms="$(elapsed_ms "$workflow_started" "$workflow_finished")"
 jq -n \
   --arg workflow_started_utc "$workflow_started_utc" \
   --arg target_hash "$TARGET_HASH" \
+  --arg input_method "$input_method" \
   --argjson target_block "$TARGET_BLOCK" \
-  --argjson target_sync_reused "$target_sync_reused" \
+  --argjson acquisition_block "$acquisition_block" \
+  --argjson input_reused "$input_reused" \
   --argjson build_ms "$build_ms" \
   --argjson data_and_rpc_ms "$data_and_rpc_ms" \
   --argjson simulator_start_ms "$simulator_start_ms" \
@@ -111,7 +113,9 @@ jq -n \
       workflow_started_utc: $workflow_started_utc,
       target_block: $target_block,
       target_hash: $target_hash,
-      target_sync_reused: $target_sync_reused,
+      input_acquisition_block: $acquisition_block,
+      input_acquisition_method: $input_method,
+      input_reused: $input_reused,
       build_seconds: ($build_ms / 1000),
       data_acquisition_and_rpc_ready_seconds: ($data_and_rpc_ms / 1000),
       simulator_start_seconds: ($simulator_start_ms / 1000),

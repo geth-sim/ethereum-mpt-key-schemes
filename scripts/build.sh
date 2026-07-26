@@ -42,7 +42,7 @@ sync_tag_commit="$(git -C "$SYNC_GETH_DIR" rev-parse "$SYNC_GETH_VERSION^{commit
 [[ "$sync_tag_commit" == "$SYNC_GETH_COMMIT" ]] ||
   die "geth release tag $SYNC_GETH_VERSION does not identify pinned commit $SYNC_GETH_COMMIT"
 
-echo "Building geth $SYNC_GETH_VERSION for target sync and local RPC"
+echo "Building geth $SYNC_GETH_VERSION for ERA import, P2P fallback, and local RPC"
 GOTOOLCHAIN="$SYNC_GO_TOOLCHAIN" make -C "$SYNC_GETH_DIR" geth
 cp "$SYNC_GETH_DIR/build/bin/geth" "$BIN_DIR/geth.new"
 mv -f "$BIN_DIR/geth.new" "$BIN_DIR/geth"

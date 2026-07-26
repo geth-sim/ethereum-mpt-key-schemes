@@ -88,7 +88,8 @@ run_case() {
   wait_for_tcp "$SIMULATOR_HOST" "$SIMULATOR_PORT" 120 ||
     die "simulator did not start; see $console_log"
 
-  PYTHONUNBUFFERED=1 SIMULATOR_DB="$db_path" "$ROOT_DIR/scripts/run_mariadb_client.sh" \
+  PYTHONUNBUFFERED=1 TARGET_BLOCK="$TARGET_BLOCK" SIMULATOR_DB="$db_path" \
+    "$ROOT_DIR/scripts/run_mariadb_client.sh" \
     >"$client_log" 2>&1
   cleanup_simulator
   finished="$(date +%s%N)"
