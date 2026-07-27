@@ -4,8 +4,10 @@ set -euo pipefail
 source "$(dirname "$0")/common.sh"
 
 require_command git
-require_command go
 require_command make
+# Uses a suitable system Go, or installs the pinned bootstrap under runtime/.
+# shellcheck source=ensure_go.sh
+source "$ROOT_DIR/scripts/ensure_go.sh"
 
 clone_and_checkout() {
   local repository="$1"

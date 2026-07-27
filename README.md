@@ -26,13 +26,15 @@ Tested environment:
 - Ubuntu 22.04 LTS, x86-64
 - at least 8 GB RAM for the quick check
 - at least 16 GB RAM for the reduced multi-case runs
-- Go with automatic toolchain selection support
+- Go 1.21+ is reused when available; if Go is missing or older, the scripts
+  install a checksum-pinned bootstrap under `runtime/toolchains`
 - Python 3.10 or later
 - Git, GNU Make, a C compiler, `curl`, and `jq`
 - outbound HTTPS access; outbound Ethereum P2P access is used only by the
   fallback input method
 - an open-file limit above 1,000
-- MariaDB 10.10+ and PyMySQL for stats and E1–E7 runs
+- MariaDB 10.6+ and PyMySQL for stats and E1–E7 runs; MariaDB 10.10+ is
+  recommended
 - about 5 GB free space for the quick check, 20 GB for the 1M stats smoke,
   and 60 GB when retaining every 100K E1–E7 validation database
 
@@ -53,6 +55,10 @@ The scripts pin:
 - fast and instrumented goleveldb commits;
 - Go 1.24.13 for the sync client and Go 1.21.13 for the simulator; and
 - the data-analysis commit and its Python dependencies.
+
+MariaDB 10.6 was validated with the Ubuntu 22.04 distribution package. If a
+distribution-specific 10.6 build fails after checking `logs/mariadb.log`,
+available disk space, and port permissions, retry with MariaDB 10.10 or later.
 
 Exact revisions and canonical block hashes are in
 [`config.env`](config.env).
