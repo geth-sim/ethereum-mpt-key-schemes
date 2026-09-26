@@ -1,44 +1,26 @@
 # Ethereum MPT Key-Scheme Artifact
 
-This repository downloads a pinned Ethereum mainnet prefix, replays it from
-genesis under multiple MPT key schemes, and produces timing, storage, LevelDB,
-and read-path statistics.
+This artifact replays real Ethereum mainnet blocks to compare MPT key schemes,
+authentication costs, and storage configurations. It provides the implementations,
+input preparation, experiment runners, and analysis needed to reproduce the
+paper's experiments.
 
-Reduced runs are functional checks. The paper reports trends over blocks
-5M–10M; use the full-scale E1–E7 profiles to evaluate those trends.
-
-## Execution profiles
-
-| Profile | Range | Purpose | Reference time |
-|---|---:|---|---:|
-| Quick check | 0–100K | Build, prepare the shared 1M input, replay H, and validate output | About 5–10 minutes |
-| Stats smoke | 0–500K | Run H, PV*, and VP* with detailed LevelDB instrumentation | About 30 minutes after input preparation |
-| Extended stats | 0–1M | Exercise the wider read-stat counter set | About 65 minutes after input preparation |
-| E1–E7 validation | 0–50K | Check every experiment configuration with real transactions | About 30 minutes |
-| E1–E7 paper | 0–10M | Reproduce the paper-scale experiments | Several days per case |
-
-Measured times are host and storage dependent and are not pass/fail criteria.
+Start with the [quick check](#quick-check) to build, download input, and try a
+short replay. Then [prepare Ethereum data](#prepare-ethereum-data) for your chosen
+experiments, [run them](#run-experiments), and [analyze their results](#analyze-results).
+Run all commands from this repository root, including in additional terminals.
 
 ## Requirements
 
-Tested environment:
+- Ubuntu 22.04 LTS, x86-64; Python 3.10+; outbound HTTPS access.
+- At least 8 GB RAM and about 5 GB free disk for the quick check; at least
+  16 GB RAM for reduced multi-case runs.
+- Allow about 100 GB of free disk space for artifact evaluation, excluding
+  paper-scale reproduction.
+- Git, GNU Make, a C compiler, `curl`, `jq`, and an open-file limit above 1,000.
+- MariaDB 10.6+ and PyMySQL for custom runs and paper experiments. The server uses artifact-local data files.
 
-- Ubuntu 22.04 LTS, x86-64
-- at least 8 GB RAM for the quick check
-- at least 16 GB RAM for the reduced multi-case runs
-- Go 1.21+ is reused when available; if Go is missing or older, the scripts
-  install a checksum-pinned bootstrap under `runtime/toolchains`
-- Python 3.10 or later
-- Git, GNU Make, a C compiler, `curl`, and `jq`
-- outbound HTTPS access; outbound Ethereum P2P access is used only by the
-  fallback input method
-- an open-file limit above 1,000
-- MariaDB 10.6+ and PyMySQL for stats and E1–E7 runs; MariaDB 10.10+ is
-  recommended
-- about 5 GB free space for the quick check, 20 GB for the 1M stats smoke,
-  and 60 GB when retaining every 100K E1–E7 validation database
-
-Ubuntu/Debian packages:
+Install the Ubuntu/Debian packages and check the file limit:
 
 ```bash
 sudo apt-get update
@@ -48,228 +30,215 @@ sudo apt-get install -y \
 ulimit -n
 ```
 
-The scripts pin:
-
-- upstream geth v1.17.3 for input acquisition;
-- the modified geth artifact commit;
-- fast and instrumented goleveldb commits;
-- Go 1.24.13 for the sync client and Go 1.21.13 for the simulator; and
-- the data-analysis commit and its Python dependencies.
-
-MariaDB 10.6 was validated with the Ubuntu 22.04 distribution package. If a
-distribution-specific 10.6 build fails after checking `logs/mariadb.log`,
-available disk space, and port permissions, retry with MariaDB 10.10 or later.
-
-Exact revisions and canonical block hashes are in
-[`config.env`](config.env).
+The build scripts fetch pinned source commits and obtain the required Go
+toolchains automatically. Versions, block hashes and defaults are in
+[`config.env`](config.env); experiment cases are in
+[`experiments/paper-experiments.json`](experiments/paper-experiments.json).
+Full-scale cases can take several days each and require much more storage.
+The paper's hardware and common settings are listed in the
+[experiment guide](docs/EXPERIMENT_COVERAGE.md#common-paper-configuration).
 
 ## Quick check
 
-From the repository root:
+Run this first to check that the artifact builds and executes on your machine.
+No Ethereum data needs to be prepared beforehand. With the default settings,
+the command automatically:
+
+1. Builds the pinned Geth and simulator dependencies.
+2. Downloads or reuses Ethereum mainnet data through **50K**, verifies the
+   genesis and target block hashes, and starts a local RPC.
+3. Replays blocks **0–50K** with scheme **H**, LevelDB, and Snappy.
+4. Checks that the saved results cover the expected block range and contain
+   the expected number of transactions.
 
 ```bash
-./scripts/reproduce.sh
+./scripts/quick_check.sh
 ```
 
-This command builds every dependency, downloads and imports a checksum-verified
-Ethereum mainnet ERA prefix through block 1M, starts a local RPC and simulator,
-replays H from genesis through block 100K, and validates the result structure.
-The prepared 1M input is reused by all reduced profiles.
-
-Success ends with:
+This checks installation and basic execution. The quick check reads input
+directly from the local RPC and does not require MariaDB. Runtime depends on
+the host, network and storage.
+All steps have passed when the final status is:
 
 ```text
-QUICK REPLAY: PASS
 REPRODUCIBILITY QUICK CHECK: PASS
 ```
 
-The state root is not a pass condition because it depends on the selected key
-scheme.
+If it fails, check the terminal error and the [failure diagnostics](#if-a-run-fails).
 
-Primary outputs:
+## Prepare Ethereum data
 
-```text
-runtime/quick-summary.json
-runtime/phase-timings.json
-runtime/simulator-db/
-runtime/simulator/logFiles/evm/runs/H_archive_leveldb_snappy_fast/
-logs/era-download.log
-logs/era-import.log
-logs/simulator.console.log
-```
+Download canonical Ethereum mainnet blocks and transactions, then load them
+into MariaDB for custom runs or paper experiments. Each experiment reads the needed
+block range from MariaDB and replays the transactions to build its own state database.
 
-## Input preparation and replay ranges
-
-Prepare the shared input without starting a long-lived RPC:
+If you skipped the quick check, build the dependencies first:
 
 ```bash
 ./scripts/build.sh
-./scripts/prepare_input.sh
 ```
 
-For every requested target up to 1M, this prepares blocks 0–1M once. Clients
-then select only the range needed by their profile:
+The data-preparation and replay targets are pinned in [`config.env`](config.env):
 
-```text
-quick check       0–100K
-stats smoke       0–500K
-extended stats    0–1M
-E1–E7 validation  0–50K
-```
+| Use | Target block | Target block hash |
+|---|---|---|
+| Quick check and short validation runs | 50,000 (50K) | `0x0e30a7c0c1cee426011e274abc746c1ad3c48757433eb0139755658482498aa9` |
+| Optional Table 4 storage comparison | 250,000 (250K) | `0x8078cc5a09d917be6300aef3043695b9be6da9bb4178ec9895c99fefd96660c7` |
+| Optional shorter run | 500,000 (500K) | `0xac8e95f7483f7131261bcc0a70873f8236c27444c940defc677f74f281220193` |
+| Optional H/PV*/VP* statistics smoke replay | 1,000,000 (1M) | `0x8e38b4dbf6b11fcc3b9dee84fb7986e29ca0a02cecd8977c161ff7333329681e` |
+| Paper-scale input | 10,000,000 (10M) | `0xaa20f7bde5be60603f11a45fc4923aab7552be775403fc00c2e6b805e6297dbe` |
 
-Input acquisition uses these deterministic stages:
-
-```text
-checksum-verified ERA download and import
-  → retry the configured ERA endpoint(s)
-  → P2P target sync fallback
-  → pinned genesis and acquisition-target hash verification
-```
-
-ERA and fallback settings are in `config.env`. To disable the P2P fallback:
-
-```bash
-INPUT_ACQUISITION_FALLBACK=none ./scripts/prepare_input.sh
-```
-
-Start an offline RPC for any supported replay endpoint. The underlying 1M
-input is reused:
+Set `TARGET_BLOCK_NUMBER` and `TARGET_BLOCK_HASH` to your desired block number
+and its matching hash from the table above, then run:
 
 ```bash
 source config.env
-TARGET_BLOCK="$TARGET_500K_BLOCK" TARGET_HASH="$TARGET_500K_HASH" \
-  ./scripts/sync_and_serve.sh
+TARGET_BLOCK="$TARGET_BLOCK_NUMBER" TARGET_HASH="$TARGET_BLOCK_HASH" \
+  ./scripts/prepare_ethereum_data.sh
 ```
 
-If a requested target is larger than 1M, such as the paper-scale 10M endpoint,
-input preparation automatically raises the acquisition range to that target.
+This command downloads the data, starts MariaDB, and imports the blocks in
+one terminal. When it prints `READY`, continue with the experiments below.
+The RPC stops automatically; MariaDB stays running in the background.
 
-On the validation host, ERA download, import, and verification took about four
-minutes through 1M. Network and storage conditions can change this time.
+Preparing data through 1M takes about 15 minutes and stores about 3 GB of input data.
 
-## MariaDB input cache
+By default, the scripts download historical block archives (Era1) over HTTPS
+and import them into Geth, falling back to P2P target sync if this fails.
+To use P2P target sync directly for a new download, add
+`INPUT_ACQUISITION_METHOD=target-sync` to the environment assignments above.
 
-Stats and E1–E7 runs reuse a local MariaDB copy of the canonical blocks and
-transactions. Start the artifact-local server in a separate terminal:
+## Run experiments
+
+### Run a simulation with your own options
+
+For example, run PV* with LevelDB and Snappy by starting the simulator in one
+terminal. Change the scheme and options in this command as needed:
 
 ```bash
-./scripts/start_mariadb.sh
+SIMULATOR_SCHEME=PVstar SIMULATOR_STATE_MODE=auto \
+SIMULATOR_DB_BACKEND=leveldb SIMULATOR_COMPRESSION=snappy \
+SIMULATOR_VARIANT=fast \
+SIMULATOR_WORKDIR="$PWD/runtime/custom/output" \
+SIMULATOR_DB="$PWD/runtime/custom/database" \
+  ./scripts/run_simulator.sh
 ```
 
-With the matching geth RPC still open, import 1M once so every reduced profile
-can select its own prefix:
+<details>
+<summary>Scheme and option values</summary>
+
+Set these variables on the simulator command. Defaults and further options,
+including cache layout, node padding, and detailed counters, are in
+[`config.env`](config.env).
+
+| Variable | Values |
+|---|---|
+| `SIMULATOR_SCHEME` | `H`, `P`, `PH`, `PV`, `PVstar`, `VH`, `VP`, `VPstar`; `PVstar`/`VPstar` denote PV*/VP*. |
+| `SIMULATOR_STATE_MODE` | `auto`, `archive`, `non-archive`. `auto` selects non-archive for P and archive for the others; P requires `auto` or `non-archive`. |
+| `SIMULATOR_DB_BACKEND` | `leveldb`, `pebbledb` |
+| `SIMULATOR_COMPRESSION` | `snappy`, `none`, or `zstd`; zstd requires `pebbledb`. |
+| `SIMULATOR_VARIANT` | `fast` for timing; `stats` for detailed LevelDB read counters. |
+| `SIMULATOR_MYHASH` | `false` or `true`; myHash is supported for PVstar/VPstar. |
+| `SIMULATOR_MYHASH_CACHE_MB` | Cache size, such as `0` or `4096`; a nonzero size requires `SIMULATOR_MYHASH=true`. |
+| `SIMULATOR_VERSION_WRAP` | `none`, `0xffff` (16-bit), or `0xfffff` (20-bit); wrapping requires VH. |
+
+</details>
+
+Once the simulator is listening, set `TARGET_BLOCK_NUMBER` in another terminal
+and replay through that block, using the same database path:
 
 ```bash
-source config.env
-TARGET_BLOCK="$TARGET_1M_BLOCK" TARGET_HASH="$TARGET_1M_HASH" \
-  ./scripts/import_mariadb.sh
+TARGET_BLOCK="$TARGET_BLOCK_NUMBER" \
+SIMULATOR_DB="$PWD/runtime/custom/database" \
+  ./scripts/run_mariadb_client.sh
 ```
 
-The importer is resumable. A smaller import may still be requested with the
-matching `TARGET_100K_*` or `TARGET_500K_*` values, and a later 1M import starts
-after the last stored block. Use `TARGET_10M_*` for paper-scale input.
+The client recreates the specified state database and replays from genesis.
+Raw results are under `runtime/custom/output/logFiles/evm/runs/`.
+Stop the simulator after the client finishes; use a different custom directory
+for each run you want to retain.
 
-## Stats smoke
+### Reproduce the paper experiments (E1–E7)
 
-After preparing MariaDB through at least 500K:
+The artifact organizes the paper's experiments into seven groups, labeled
+**E1–E7** in the table below. These IDs are used in the commands that follow.
+The runners select each group's configurations and collect their results
+automatically.
 
-```bash
-./scripts/run_core_smoke.sh
-```
+| Experiment | What it tests | Results and paper location |
+|---|---|---|
+| E1 | Compare H, P, PH, PV, PV*, VH, VP, and VP* to measure how the key scheme affects execution cost and storage. | Execution and read/write times, cache/lookup statistics, compaction and storage; Figures 5–7, Tables 2–3 |
+| E2 | Randomize keys, values, or both in the PV* database to separate their contributions to compression. | Rewritten database sizes; §5.2 |
+| E3 | Add myHash to PV*/VP* and vary its cache to measure authentication overhead and the benefit of caching. | Execution times, child distributions, cache hits and node reads/writes; Figure 8 and §5.3 |
+| E4 | Approximate decoupled-authentication costs by padding PV*/VP* nodes and disabling compression. | Execution time and storage under the approximation; Figure 9 |
+| E5 | Limit VH versions to 16 or 20 bits to measure the performance effect of version reuse after wraparound. | Execution times compared with unwrapped VH; Figure 10 |
+| E6 | Compare LevelDB/Pebble and Snappy/zstd to see how the backend and compression affect key-scheme results. | Backend/compression performance and storage; Figure 11, Table 4 |
+| E7 | Run H/PV*/VP* in non-archive mode to examine how state retention affects execution and storage. | Execution times and storage, with E1 archive baselines; §5.4 |
 
-This runs H, PV*, and VP* with the instrumented binary. Each case produces:
+Exact cases and result mappings are in [the experiment guide](docs/EXPERIMENT_COVERAGE.md).
+The second argument selects what the runner does:
 
-- per-block `simBlocks`;
-- cumulative `leveldb_stats`; and
-- detailed `read_stats` checkpoints.
+| Argument | Default behavior |
+|---|---|
+| `list` | Show the experiment's case IDs (first column) and configurations without running them. No Ethereum input is needed. |
+| `validation` | Run the validation cases to check execution and analysis, with replays covering **0–50K** by default. These runs do not reproduce the paper-scale numbers. |
+| `paper` | Run all cases for the experiment, with replays covering **0–10M** by default. |
 
-Outputs are isolated under:
+Running all E1–E7 groups with the default `validation` profile takes about
+20 minutes and uses about 40 GB for experiment databases, logs, and results.
 
-```text
-runtime/core-smoke-500000/
-├── databases/
-├── logs/
-├── simulator-output/logFiles/evm/runs/
-└── smoke-report.json
-```
+For replay experiments, first prepare and import Ethereum data through
+your chosen end block into MariaDB.
 
-To run the optional 1M version after importing MariaDB through 1M:
-
-```bash
-source config.env
-TARGET_BLOCK="$TARGET_1M_BLOCK" TARGET_HASH="$TARGET_1M_HASH" \
-  ./scripts/run_core_smoke.sh
-```
-
-## E1–E7 experiments
-
-The case matrix is
-[`experiments/paper-experiments.json`](experiments/paper-experiments.json).
-List a family with:
+List the available cases, then run a family with the desired profile:
 
 ```bash
 ./scripts/run_paper_experiment.sh E1 list
+./scripts/run_paper_experiment.sh E1 validation
 ```
 
-The `validation` profile uses blocks 0–50K. This prefix includes 1,871
-transactions and is sufficient to check configuration and output paths. Any
-MariaDB prefix of at least 50K can be reused.
-
-Run every validation family:
-
-```bash
-for experiment in E1 E3 E4 E5 E6 E7; do
-  ./scripts/run_paper_experiment.sh "$experiment" validation
-done
-./scripts/run_e2_db_rewrites.sh validation
-```
-
-Run a paper-scale family or a single case:
+Replace `E1` with any experiment ID from `E2` to `E7` to run another family.
+For a full-scale family, use `paper` after preparing the 10M input:
 
 ```bash
 ./scripts/run_paper_experiment.sh E1 paper
-./scripts/run_paper_experiment.sh E1 paper E1_PVstar
-./scripts/run_e2_db_rewrites.sh paper
 ```
 
-E2 consumes the corresponding E1 PV* database, so run E1 before E2.
+To choose your own end block, pass only the block number to the runner:
 
-| ID | Configurations | Result category |
-|---|---|---|
-| E1 | H, P, PH, PV, PV*, VH, VP, and VP*; fast and stats variants | Core execution, read/write, storage, and detailed LevelDB/read-path metrics |
-| E2 | PV* database with randomized keys, values, or both | Compression-source text |
-| E3 | PV*/VP* myHash and cache configurations | myHash and cache execution comparison |
-| E4 | PV*/VP* without compression and with 1.125 padding | Decoupled-authentication approximation |
-| E5 | VH with 20-bit and 16-bit version wrapping | Version-size sensitivity |
-| E6 | H/PV*/VP* with Pebble Snappy and zstd | Backend, compression, execution, and storage comparison |
-| E7 | H/PV*/VP* in non-archive mode | Non-archive execution and storage comparison |
-
-P uses its paper configuration, including state history, in the `paper`
-profile. The reduced validation profile disables its state history only to
-avoid spending most of the functional check on persistence unrelated to key
-scheme execution. Both profiles retain the simulator's original P cache
-allocation; there are no separate buffered/unbuffered P configurations.
-
-Each case keeps its database, simulator output, and logs under:
-
-```text
-runtime/paper-experiments/<profile>/<experiment>/<case-id>/
+```bash
+TARGET_BLOCK="$TARGET_BLOCK_NUMBER" \
+  ./scripts/run_paper_experiment.sh E1 paper
 ```
 
-Pebble preallocates WAL space: the measured 100K E6 databases occupied about
-40 GB on disk although their `simBlocks.DiskSize` values were much smaller.
+With `TARGET_BLOCK` set, `paper` replays from genesis only through the
+specified block, overriding the default of 10M. MariaDB must already contain
+all blocks from genesis through that block.
 
-If a case stops before its requested end block, its logs and any completed
-checkpoint outputs must be retained and the runner proceeds to the next case.
+To run just one case, append its ID from the first column of `list` output.
+For example:
 
-Detailed scheme and experiment settings are summarized in
-[`docs/EXPERIMENT_COVERAGE.md`](docs/EXPERIMENT_COVERAGE.md).
+```bash
+./scripts/run_paper_experiment.sh E1 validation E1_PVstar
+```
 
-## Result analysis
+All experiment results are under `runtime/paper-experiments/<profile>/<experiment>/`:
 
-### Block execution, speedup, read/write time, and disk size
+| Output | Contents |
+|---|---|
+| `run-report.json` | Family results, effective settings and paths used by analysis |
+| `run-report_<case-id>.json` | Report when an individual case is selected |
+| `<case-id>/output/` | Block timing/storage records and enabled statistics |
+| `<case-id>/database/` | Replay database; E2 uses the E1 PV* database |
+| `<case-id>/simulator.log`, `<case-id>/client.log` | Progress and diagnostics |
+| `rewrite-report.json` (E2) | Rewritten database sizes and entry counts |
+| `rewrite-report_<case-id>.json` (E2) | Report when an individual rewrite case is selected |
 
-Install the pinned plotting dependencies once:
+## Analyze results
+
+### Figures
+
+Install the plotting dependencies once:
 
 ```bash
 python3 -m venv runtime/analysis-venv
@@ -277,150 +246,160 @@ runtime/analysis-venv/bin/pip install \
   -r sources/data-analysis/requirements-artifact.txt
 ```
 
-Generate the six standard plots from the stats smoke:
+After running the corresponding experiment groups without a case ID, use the
+commands below to generate figures. Each command generates all plots for its
+experiment:
+
+| Paper figure | Command | Corresponding output |
+|---|---|---|
+| Figure 5(a–b): block execution time and speedup relative to H | `./scripts/generate_experiment_graphs.sh E1 validation` | `compare_block_execute_time.png`, `compare_block_speedup.png` |
+| Figure 6: read time | `./scripts/generate_experiment_graphs.sh E1 validation` | `compare_read_time.png` |
+| Figure 7: write time | `./scripts/generate_experiment_graphs.sh E1 validation` | `compare_write_time.png` |
+| Figure 8: myHash and caching | `./scripts/generate_experiment_graphs.sh E3 validation` | `compare_block_speedup.png` |
+| Figure 9: authentication-cost approximation | `./scripts/generate_experiment_graphs.sh E4 validation` | `compare_block_speedup.png` |
+| Figure 10: version sizes | `./scripts/generate_experiment_graphs.sh E5 validation` | `compare_block_speedup.png` |
+| Figure 11: Pebble with Snappy/zstd | `./scripts/generate_experiment_graphs.sh E6 validation` | `pebble-overview/compare_block_execute_time.png` |
+| §5.4 non-archive comparison (supplementary plots) | `./scripts/generate_experiment_graphs.sh E7 validation` | `compare_block_execute_time.png`, `compare_disk_size.png` |
+
+Replace `validation` with `paper` for the paper's 5M–10M range. Output paths
+are relative to `runtime/paper-experiments/<profile>/<experiment>/graphs/`.
+
+Graphs for E3–E6 (Figures 8–11) also use E1 results. If you have not already
+run E1, run it once with the same profile and end block:
 
 ```bash
-ANALYSIS_PYTHON=runtime/analysis-venv/bin/python \
-  ./scripts/generate_graphs.sh \
-  runtime/core-smoke-500000/smoke-report.json \
-  runtime/core-smoke-500000/graphs
+./scripts/run_paper_experiment.sh E1 validation
 ```
 
-The plots are:
+### Tables 2–4 and storage statistics
 
-```text
-compare_block_execute_time.png
-compare_block_speedup.png
-compare_read_time.png
-compare_write_time.png
-compare_disk_size.png
-compare_disk_size_diff_mavg.png
-```
-
-The same simulator fields are used for E1, E3–E7. Experiment-specific figures
-are generated with the paper-defined baseline and case ordering:
+For Tables 2–3, use the E1 results:
 
 ```bash
-./scripts/generate_experiment_graphs.sh E1 validation
-./scripts/generate_experiment_graphs.sh E3 validation
-./scripts/generate_experiment_graphs.sh E4 validation
-./scripts/generate_experiment_graphs.sh E5 validation
-./scripts/generate_experiment_graphs.sh E6 validation
-./scripts/generate_experiment_graphs.sh E7 validation
-```
-
-Replace `validation` with `paper` for blocks 5M–10M. E6 creates separate
-overview, compression-specific speedup, and per-scheme backend/compression
-directories so each speedup uses the matching H baseline. E2 is a database
-rewrite and has no block-execution graph family.
-
-### LevelDB and read metrics
-
-Generate the read-path and compaction/storage summaries:
-
-```bash
+# Validation
 ./scripts/analyze_storage_metrics.sh \
-  runtime/core-smoke-500000/smoke-report.json
-```
-
-For a 1M cumulative checkpoint or a sub-window:
-
-```bash
-./scripts/analyze_storage_metrics.sh \
-  runtime/core-smoke-1000000/smoke-report.json \
-  --end-block 1000000
+  runtime/paper-experiments/validation/E1/run-report.json --variant stats \
+  --output-dir runtime/paper-experiments/validation/E1/table2
 
 ./scripts/analyze_storage_metrics.sh \
-  runtime/core-smoke-1000000/smoke-report.json \
-  --start-block 500000 --end-block 1000000
+  runtime/paper-experiments/validation/E1/run-report.json --variant fast \
+  --output-dir runtime/paper-experiments/validation/E1/table3
+
+# Paper-scale
+./scripts/analyze_storage_metrics.sh \
+  runtime/paper-experiments/paper/E1/run-report.json --variant stats \
+  --start-block 5000000 --end-block 10000000 \
+  --output-dir runtime/paper-experiments/paper/E1/table2
+
+./scripts/analyze_storage_metrics.sh \
+  runtime/paper-experiments/paper/E1/run-report.json --variant fast \
+  --start-block 0 --end-block 10000000 \
+  --output-dir runtime/paper-experiments/paper/E1/table3
 ```
 
-Outputs include:
+Table 2 is in `table2/read_path_summary.csv`; Table 3 is in
+`table3/compaction_storage_summary.csv`. Write-stall statistics are in
+`table3/leveldb_metrics.csv`.
 
-```text
-storage_metrics.json
-leveldb_metrics.csv
-read_metrics.csv
-read_path_summary.csv
-compaction_storage_summary.csv
-storage_metric_summaries.md
-```
-
-The read-path summary calculates negative lookups as all on-disk fake lookups,
-including L0, divided by read requests. Data-block cache hit rate is reported
-as a percentage. The compaction/storage summary reads size from the final
-requested checkpoint's `simBlocks.DiskSize`.
-
-Definitions and source fields are in
-[`docs/STORAGE_METRICS.md`](docs/STORAGE_METRICS.md).
-
-## Generated files
-
-Simulator results follow:
-
-```text
-runtime/.../logFiles/evm/runs/<experiment-id>/
-├── simBlocks/
-│   └── evm_simulation_result_<experiment-id>_0_<end>.json
-└── leveldbStats/
-    ├── leveldb_stats_<experiment-id>_0_<end>.json
-    └── read_stats_<experiment-id>_<checkpoint>.json
-```
-
-The simulator database is separate from the input geth datadir:
-
-```text
-runtime/geth/                 canonical Ethereum input (1M by default)
-runtime/input-acquisition/    temporary ERA or P2P fallback work
-runtime/simulator-db/         quick-check replay state
-runtime/core-smoke-*/databases/
-runtime/paper-experiments/*/*/*/database/
-```
-
-The experiment ID always includes scheme, archive mode, backend, compression,
-binary variant, and active optional features, preventing output collisions.
-
-## Re-running and cleanup
-
-Remove runtime data while keeping sources and binaries:
+For Table 4, use the E1 and E6 results:
 
 ```bash
-./scripts/clean_runtime.sh
+# Validation
+python3 analysis/extract_backend_storage.py \
+  runtime/paper-experiments/validation/E1/run-report.json \
+  runtime/paper-experiments/validation/E6/run-report.json \
+  --output-dir runtime/paper-experiments/validation/E6/table4
+
+# Paper-scale comparison at 10M
+python3 analysis/extract_backend_storage.py \
+  runtime/paper-experiments/paper/E1/run-report.json \
+  runtime/paper-experiments/paper/E6/run-report.json \
+  --end-block 10000000 \
+  --output-dir runtime/paper-experiments/paper/E6/table4
 ```
 
-Remove all reproducible downloads, builds, runtime data, logs, and Python
-bytecode:
+The `table4/` directory contains `backend_storage.csv`, `.json`, and `.md`.
+Source fields and size definitions are in [storage metrics](docs/STORAGE_METRICS.md).
+
+### Optional: longer runs for Tables 2–4
+
+The default 50K validation run is too small to exercise much disk read/write
+activity, so Tables 2–4 may show N/A, zeros, or little difference between schemes.
+For more substantial storage results, run the following experiments. Prepare
+Ethereum data through 1M for Tables 2–3, or through 250K for Table 4 alone:
 
 ```bash
-./scripts/clean_all_generated.sh
+# Tables 2–3: H/PV*/VP* with detailed statistics through 1M
+./scripts/run_core_smoke.sh
+./scripts/analyze_storage_metrics.sh \
+  runtime/core-smoke-1000000/smoke-report.json --variant stats \
+  --output-dir runtime/core-smoke-1000000/tables2-3
+
+# Table 4: compare backends and compression at 250K
+./scripts/run_table4_smoke.sh
 ```
 
-The next `./scripts/reproduce.sh` clones, rebuilds, reacquires input, and
-replays from scratch.
+Allow about 1 hour and 20 GB for the 1M smoke, and 30 minutes and 25 GB for
+standalone Table 4. These sizes cover experiment databases, logs, and results.
 
-## Troubleshooting
+| Paper table | Result |
+|---|---|
+| 2 | `runtime/core-smoke-1000000/tables2-3/read_path_summary.csv` |
+| 3 | `runtime/core-smoke-1000000/tables2-3/compaction_storage_summary.csv` |
+| 4 | `runtime/table4-smoke-250000/table4/backend_storage.csv` |
 
-If ERA input preparation fails, inspect:
+### Authentication statistics
+
+Use the E3 results to extract child distributions, cache hits, node reads/writes
+and node-count-based storage estimates:
 
 ```bash
-tail -n 100 logs/era-download.log
-tail -n 100 logs/era-import.log
-tail -n 100 logs/era-verify.log
+# Validation
+python3 analysis/extract_auth_metrics.py \
+  runtime/paper-experiments/validation/E3/run-report.json
+
+# Paper-scale (5M–10M)
+python3 analysis/extract_auth_metrics.py \
+  runtime/paper-experiments/paper/E3/run-report.json \
+  --start-block 5000000 --end-block 10000000
 ```
 
-The script then tries the configured P2P fallback. If that also fails, confirm
-that outbound Ethereum TCP/UDP traffic is allowed and inspect:
+The `auth-metrics/` directory under E3 contains `auth_metrics.csv`,
+`auth_metrics.json`, and `auth_metrics.md`. Metric definitions are in
+[authentication metrics](docs/AUTHENTICATION_METRICS.md).
+
+## If a run fails
+
+For the quick check, build, replay-client, and result-check errors appear in
+the terminal. Check `logs/sync-and-rpc.console.log` for data-preparation/RPC
+failures and `logs/simulator.console.log` for simulator failures. If a port is
+already in use, stop the existing RPC or simulator before retrying.
+
+For Ethereum data preparation, import errors appear in the terminal. Check
+`logs/prepare-ethereum-rpc.log` for download/RPC failures and
+`logs/mariadb.console.log` or `logs/mariadb.log` for MariaDB startup failures.
+
+For paper experiments, check the case's `simulator.log` and `client.log`, or `logs/mariadb.log` for
+input-cache problems. Input acquisition logs are `logs/era-download.log`,
+`logs/era-import.log`, and `logs/era-verify.log`. Acquisition falls back to P2P
+sync when needed; this requires outbound Ethereum TCP/UDP access and logs to
+`logs/geth-target-sync.log`. Use the block/hash pairs pinned in `config.env`.
+
+<details>
+<summary>Optional cleanup</summary>
+
+After finishing your experiments, stop MariaDB with:
 
 ```bash
-tail -n 100 logs/geth-target-sync.log
+mariadb-admin --no-defaults --socket="$PWD/runtime/mariadb.sock" -u root shutdown
 ```
 
-If a target hash check fails, stop the run. Use only the block/hash pairs
-pinned in `config.env`.
+Run the preparation command again when you need MariaDB for another session.
 
-If the simulator exits, inspect the case-specific simulator and client logs.
-Completed result checkpoints are not invalidated merely because a later block
-failed.
+Stop MariaDB and any running experiments before cleanup.
+`./scripts/clean_runtime.sh` removes `runtime/`.
+`./scripts/clean_all_generated.sh` removes downloaded sources, binaries,
+runtime data and logs. Both delete generated experiment data; run them only
+when those results are no longer needed.
 
-The default ports are geth RPC `28545`, geth P2P `30333`, MariaDB `23306`, and
-simulator `28889`. They can be overridden through environment variables.
+</details>

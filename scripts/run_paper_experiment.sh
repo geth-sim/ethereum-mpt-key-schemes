@@ -1,19 +1,22 @@
 #!/usr/bin/env bash
 set -euo pipefail
 target_was_set="${TARGET_BLOCK+x}"
+target_override="${TARGET_BLOCK-}"
 # shellcheck source=common.sh
 source "$(dirname "$0")/common.sh"
 
 usage() {
   cat <<'EOF'
 Usage:
-  ./scripts/run_paper_experiment.sh E1 validation [case-id]
-  ./scripts/run_paper_experiment.sh E1 paper [case-id]
-  ./scripts/run_paper_experiment.sh E1 list
+  ./scripts/run_paper_experiment.sh <E1-E7> validation [case-id]
+  ./scripts/run_paper_experiment.sh <E1-E7> paper [case-id]
+  ./scripts/run_paper_experiment.sh <E1-E7> list
 
-validation runs only manifest rows marked validation=true (50K by default).
-paper runs every replay row for the experiment (10M by default).
-Set TARGET_BLOCK explicitly to override either default.
+validation runs only manifest rows marked validation=true; replays default to 50K.
+paper runs every case for the experiment; replays default to 10M.
+Set TARGET_BLOCK to override the replay end block. No hash is needed for replay.
+Set PAPER_EXPERIMENT_ROOT to keep a separate set of experiment results.
+E2 reuses a completed E1_PVstar database from the same profile, or builds it if missing.
 EOF
 }
 
@@ -23,6 +26,7 @@ case_filter="${3:-}"
 manifest="$ROOT_DIR/experiments/paper-experiments.json"
 [[ "$experiment" =~ ^E[1-7]$ ]] || { usage; exit 2; }
 [[ -f "$manifest" ]] || die "missing $manifest"
+require_command jq
 
 if [[ "$profile" == "list" ]]; then
   jq -r --arg experiment "$experiment" '
@@ -34,23 +38,157 @@ if [[ "$profile" == "list" ]]; then
   exit
 fi
 [[ "$profile" == "validation" || "$profile" == "paper" ]] || { usage; exit 2; }
+require_command python3
+export PAPER_EXPERIMENT_ROOT="$(python3 -c 'import os, sys; print(os.path.abspath(sys.argv[1]))' \
+  "${PAPER_EXPERIMENT_ROOT:-$RUNTIME_DIR/paper-experiments}")"
 
 if [[ -z "$target_was_set" ]]; then
   if [[ "$profile" == "validation" ]]; then
     TARGET_BLOCK="$TARGET_50K_BLOCK"
-    TARGET_HASH="$TARGET_50K_HASH"
   else
     TARGET_BLOCK="$TARGET_10M_BLOCK"
-    TARGET_HASH="$TARGET_10M_HASH"
   fi
+else
+  TARGET_BLOCK="$target_override"
 fi
+[[ "$TARGET_BLOCK" =~ ^[1-9][0-9]*$ ]] ||
+  die "TARGET_BLOCK must be a positive integer without leading zeros"
+
+simulator_pid=""
+prerequisite_pid=""
+cleanup_simulator() {
+  if [[ -n "$simulator_pid" ]]; then
+    kill "$simulator_pid" >/dev/null 2>&1 || true
+    wait "$simulator_pid" >/dev/null 2>&1 || true
+    simulator_pid=""
+  fi
+}
+cleanup() {
+  if [[ -n "$prerequisite_pid" ]]; then
+    kill -- "-$prerequisite_pid" >/dev/null 2>&1 || true
+    wait "$prerequisite_pid" >/dev/null 2>&1 || true
+    prerequisite_pid=""
+  fi
+  cleanup_simulator
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+inspect_e2_source() {
+  python3 - "$ROOT_DIR/scripts" "$1" "$profile" "${target_was_set:+$TARGET_BLOCK}" <<'PY'
+import json
+import sys
+
+sys.path.insert(0, sys.argv[1])
+from e2_db_rewrite import inspect_source_database
+
+try:
+    info = inspect_source_database(sys.argv[2], sys.argv[3],
+                                   int(sys.argv[4]) if sys.argv[4] else None)
+except (ValueError, OSError) as error:
+    raise SystemExit(
+        f"ERROR: {error}. The existing database was not changed.\n"
+        f"To rebuild it, run ./scripts/run_paper_experiment.sh E1 {sys.argv[3]} E1_PVstar "
+        "with the desired TARGET_BLOCK."
+    )
+print(json.dumps(info))
+PY
+}
+
+run_e2() {
+  local source_db="$PAPER_EXPERIMENT_ROOT/$profile/E1/E1_PVstar/database"
+  local case_root="$PAPER_EXPERIMENT_ROOT/$profile/E2"
+  local workdir="$case_root/output"
+  local log="$case_root/simulator.log"
+  local summary="$case_root/rewrite-report.json"
+  local -a rewrite_cases=() rewrite_args=()
+  local case_id attempt ready=false source_info source_report source_target
+
+  mapfile -t rewrite_cases < <(jq -r \
+    --arg profile "$profile" --arg case_filter "$case_filter" '
+      .cases[] | select(.experiment == "E2" and .kind == "database-rewrite") |
+      select($profile == "paper" or .validation == true) |
+      select($case_filter == "" or .id == $case_filter) | .id
+    ' "$manifest")
+  ((${#rewrite_cases[@]} > 0)) || die "no matching E2 rewrite cases"
+  require_command tee
+  if wait_for_tcp "$SIMULATOR_HOST" "$SIMULATOR_PORT" 1; then
+    die "simulator port $SIMULATOR_PORT is already in use; stop the existing simulator before running E2"
+  fi
+  source_info="$(inspect_e2_source "$source_db")"
+  if [[ "$source_info" == null ]]; then
+    require_command setsid
+    echo "E1_PVstar database is missing; preparing blocks 0..$TARGET_BLOCK for E2."
+    TARGET_BLOCK="$TARGET_BLOCK" setsid \
+      "$ROOT_DIR/scripts/run_paper_experiment.sh" E1 "$profile" E1_PVstar < /dev/null &
+    prerequisite_pid=$!
+    wait "$prerequisite_pid" || die "E1_PVstar preparation failed; E2 was not started"
+    prerequisite_pid=""
+    source_info="$(inspect_e2_source "$source_db")"
+    [[ "$source_info" != null ]] || die "E1_PVstar completed without a source database"
+  fi
+  source_report="$(jq -r '.report' <<<"$source_info")"
+  source_target="$(jq -r '.target_block' <<<"$source_info")"
+  if [[ -n "$case_filter" ]]; then
+    log="$case_root/simulator_${case_filter}.log"
+    summary="$case_root/rewrite-report_${case_filter}.json"
+  fi
+  for case_id in "${rewrite_cases[@]}"; do
+    rewrite_args+=(--case "$case_id")
+  done
+  mkdir -p "$workdir"
+  echo "E2 uses the completed E1_PVstar database through block $source_target: $source_db"
+  echo "E2 progress is shown below and saved to $log"
+
+  SIMULATOR_WORKDIR="$workdir" SIMULATOR_DB="$source_db" \
+  SIMULATOR_VARIANT=fast SIMULATOR_SCHEME=PVstar \
+  SIMULATOR_STATE_MODE=archive SIMULATOR_DB_BACKEND=leveldb \
+  SIMULATOR_COMPRESSION=snappy SIMULATOR_MYHASH=false \
+  SIMULATOR_MYHASH_CACHE_MB=0 SIMULATOR_DISK_SIZE_MULTIPLIER=1.0 \
+  SIMULATOR_VERSION_WRAP=none \
+    "$ROOT_DIR/scripts/run_simulator.sh" > >(tee "$log") 2>&1 &
+  simulator_pid=$!
+  for ((attempt = 1; attempt <= 120; attempt++)); do
+    kill -0 "$simulator_pid" >/dev/null 2>&1 ||
+      die "simulator exited during startup; see $log"
+    if wait_for_tcp "$SIMULATOR_HOST" "$SIMULATOR_PORT" 1; then
+      ready=true
+      break
+    fi
+  done
+  [[ "$ready" == true ]] || die "simulator failed to start; see $log"
+
+  python3 -u "$ROOT_DIR/scripts/e2_db_rewrite.py" \
+    --host "$SIMULATOR_HOST" --port "$SIMULATOR_PORT" \
+    --db-path "$source_db" --seed 1 --output "$summary" "${rewrite_args[@]}"
+  cleanup_simulator
+
+  jq --arg profile "$profile" \
+    --arg source_database "${source_db#"$ROOT_DIR/"}" \
+    --arg source_report "${source_report#"$ROOT_DIR/"}" \
+    --argjson source_target_block "$source_target" \
+    --argjson source_database_bytes "$(du -sb "$source_db" | awk '{print $1}')" '
+      . + {experiment: "E2", profile: $profile,
+        source_database: $source_database, source_database_bytes: $source_database_bytes,
+        source_report: $source_report, source_target_block: $source_target_block}
+    ' "$summary" >"$summary.tmp"
+  mv "$summary.tmp" "$summary"
+  jq -e --argjson count "${#rewrite_cases[@]}" \
+    '.status == "PASS" and (.rewrites | length) == $count' "$summary" >/dev/null
+  echo "E2 $profile: PASS"
+  echo "Report: $summary"
+}
+
+# Rewrites reuse the saved E1 database; only a missing prerequisite needs replay.
 if [[ "$experiment" == "E2" ]]; then
-  die "E2 is a post-processing database rewrite; use ./scripts/run_e2_db_rewrites.sh"
+  run_e2
+  exit
 fi
 
 require_command date
-require_command jq
-require_command python3
+[[ "$SIMULATOR_RESULT_SAVE_INTERVAL" =~ ^[1-9][0-9]*$ ]] ||
+  die "SIMULATOR_RESULT_SAVE_INTERVAL must be a positive integer"
 
 python3 - <<PY
 import pymysql
@@ -69,7 +207,7 @@ if txs == 0:
 print(f"MariaDB input: {blocks} blocks, {txs} transactions")
 PY
 
-run_root="$RUNTIME_DIR/paper-experiments/$profile/$experiment"
+run_root="$PAPER_EXPERIMENT_ROOT/$profile/$experiment"
 if [[ -n "$case_filter" ]]; then
   rows="$run_root/results_${case_filter}.jsonl"
   report="$run_root/run-report_${case_filter}.json"
@@ -79,16 +217,6 @@ else
 fi
 mkdir -p "$run_root"
 : >"$rows"
-
-simulator_pid=""
-cleanup_simulator() {
-  if [[ -n "$simulator_pid" ]]; then
-    kill "$simulator_pid" >/dev/null 2>&1 || true
-    wait "$simulator_pid" >/dev/null 2>&1 || true
-    simulator_pid=""
-  fi
-}
-trap cleanup_simulator EXIT INT TERM
 
 query='.cases[] | select(.experiment == $experiment and .kind == "replay")'
 if [[ "$profile" == "validation" ]]; then
@@ -114,6 +242,12 @@ for row in "${cases[@]}"; do
   multiplier="$(jq -r '.disk_size_multiplier // 1.0' <<<"$row")"
   version_wrap="$(jq -r '.version_wrap // "none"' <<<"$row")"
   pathdb_history="$(jq -r '.pathdb_history // true' <<<"$row")"
+  child_stats="$(jq -r --argjson fallback "$SIMULATOR_CHILD_STATS" \
+    'if has("child_stats") then .child_stats else $fallback end' <<<"$row")"
+  accurate_read_counters="$(jq -r --argjson fallback "$SIMULATOR_ACCURATE_READ_COUNTERS" \
+    'if has("accurate_read_counters") then .accurate_read_counters else $fallback end' <<<"$row")"
+  [[ "$child_stats" == true || "$child_stats" == false ]] || die "invalid child_stats for $case_id"
+  [[ "$accurate_read_counters" == true || "$accurate_read_counters" == false ]] || die "invalid accurate_read_counters for $case_id"
   if [[ "$profile" == "validation" && "$scheme" == "P" ]]; then
     pathdb_history=false
   fi
@@ -124,6 +258,9 @@ for row in "${cases[@]}"; do
   simulator_log="$case_root/simulator.log"
   client_log="$case_root/client.log"
   mkdir -p "$workdir"
+  # Fresh replays must not mix counters or checkpoints from an older run.
+  rm -f "$workdir/additional_node_stats.txt"
+  rm -rf "$workdir/logFiles/evm/runs"
   rm -rf "$db_path"
   started="$(date +%s%N)"
   echo "[$case_id] $profile replay through block $TARGET_BLOCK"
@@ -136,7 +273,9 @@ for row in "${cases[@]}"; do
   SIMULATOR_DISK_SIZE_MULTIPLIER="$multiplier" \
   SIMULATOR_VERSION_WRAP="$version_wrap" \
   SIMULATOR_PATHDB_HISTORY="$pathdb_history" \
-  SIMULATOR_LEVELDB_STATS_INTERVAL="$TARGET_BLOCK" \
+  SIMULATOR_CHILD_STATS="$child_stats" \
+  SIMULATOR_ACCURATE_READ_COUNTERS="$accurate_read_counters" \
+  SIMULATOR_LEVELDB_STATS_INTERVAL="$SIMULATOR_RESULT_SAVE_INTERVAL" \
     "$ROOT_DIR/scripts/run_simulator.sh" >"$simulator_log" 2>&1 &
   simulator_pid=$!
 
@@ -159,6 +298,10 @@ for row in "${cases[@]}"; do
   simblocks=""
   leveldb_stats=""
   read_stats=""
+  additional_node_stats=""
+  if [[ "$child_stats" == true && -s "$workdir/additional_node_stats.txt" ]]; then
+    additional_node_stats="$workdir/additional_node_stats.txt"
+  fi
   completed_block=-1
   if [[ -n "$experiment_id" ]]; then
     run_dir="$workdir/logFiles/evm/runs/$experiment_id"
@@ -197,6 +340,9 @@ for row in "${cases[@]}"; do
   elif [[ "$backend" == "leveldb" && "$variant" == "stats" && -z "$read_stats" ]]; then
     status="failed"
     failed_cases=$((failed_cases + 1))
+  elif [[ "$child_stats" == true && -z "$additional_node_stats" ]]; then
+    status="failed"
+    failed_cases=$((failed_cases + 1))
   fi
 
   database_bytes=0
@@ -207,9 +353,13 @@ for row in "${cases[@]}"; do
     --arg compression "$compression" --arg status "$status" \
     --arg profile "$profile" --arg experiment_id "$experiment_id" \
     --argjson pathdb_history "$pathdb_history" \
+    --argjson child_stats "$child_stats" \
+    --argjson accurate_read_counters "$accurate_read_counters" \
+    --argjson leveldb_stats_interval "$SIMULATOR_RESULT_SAVE_INTERVAL" \
     --arg simblocks "${simblocks#"$ROOT_DIR/"}" \
     --arg leveldb_stats "${leveldb_stats#"$ROOT_DIR/"}" \
     --arg read_stats "${read_stats#"$ROOT_DIR/"}" \
+    --arg additional_node_stats "${additional_node_stats#"$ROOT_DIR/"}" \
     --arg simulator_log "${simulator_log#"$ROOT_DIR/"}" \
     --arg client_log "${client_log#"$ROOT_DIR/"}" \
     --argjson target_block "$TARGET_BLOCK" \
@@ -223,13 +373,17 @@ for row in "${cases[@]}"; do
         backend: $backend, compression: $compression, status: $status,
         manifest_case: $manifest_case, profile: $profile,
         resolved: {experiment_id: $experiment_id, target_block: $target_block,
-          completed_block: $completed_block, pathdb_history: $pathdb_history},
+          completed_block: $completed_block, pathdb_history: $pathdb_history,
+          child_stats: $child_stats, accurate_read_counters: $accurate_read_counters,
+          leveldb_stats_interval: $leveldb_stats_interval,
+          result_save_interval: $leveldb_stats_interval},
         client_exit_status: $client_exit_status,
         elapsed_seconds: ($elapsed_ms / 1000), database_bytes: $database_bytes,
         outputs: {
           simblocks: (if $simblocks == "" then null else $simblocks end),
           leveldb_stats: (if $leveldb_stats == "" then null else $leveldb_stats end),
           read_stats: (if $read_stats == "" then null else $read_stats end),
+          additional_node_stats: (if $additional_node_stats == "" then null else $additional_node_stats end),
           simulator_log: $simulator_log, client_log: $client_log
         }
       }' >>"$rows"
@@ -237,11 +391,11 @@ for row in "${cases[@]}"; do
 done
 
 jq -s --arg experiment "$experiment" --arg profile "$profile" \
-  --arg target_hash "$TARGET_HASH" --argjson target_block "$TARGET_BLOCK" \
+  --argjson target_block "$TARGET_BLOCK" \
   --arg generated_at_utc "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
     {status:(if all(.[]; .status == "complete") then "PASS" else "PARTIAL" end),
      experiment:$experiment, profile:$profile,
-     target_block:$target_block, target_hash:$target_hash,
+     target_block:$target_block,
      generated_at_utc:$generated_at_utc, case_count:length,
      complete_case_count:([.[] | select(.status == "complete")] | length),
      partial_case_count:([.[] | select(.status == "partial")] | length),

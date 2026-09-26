@@ -59,7 +59,7 @@ wait_for_tcp() {
   local attempts="${3:-60}"
   local i
   for ((i = 1; i <= attempts; i++)); do
-    if (echo >"/dev/tcp/$host/$port") >/dev/null 2>&1; then
+    if (: >"/dev/tcp/$host/$port") >/dev/null 2>&1; then
       return 0
     fi
     sleep 1

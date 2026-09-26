@@ -5,8 +5,8 @@ target_was_set="${TARGET_BLOCK+x}"
 source "$(dirname "$0")/common.sh"
 
 if [[ -z "$target_was_set" ]]; then
-  TARGET_BLOCK="$TARGET_500K_BLOCK"
-  TARGET_HASH="$TARGET_500K_HASH"
+  TARGET_BLOCK="$TARGET_1M_BLOCK"
+  TARGET_HASH="$TARGET_1M_HASH"
 fi
 
 require_command date

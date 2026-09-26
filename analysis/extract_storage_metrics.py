@@ -15,6 +15,9 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 
+# Fixed manuscript order; do not sort rows by values from a reduced run.
+TABLE3_SCHEME_ORDER = ("H", "PH", "PV", "PVstar", "VH", "VP", "VPstar", "P")
+
 
 def ratio(numerator: float, denominator: float) -> float | None:
     return numerator / denominator if denominator else None
@@ -142,8 +145,10 @@ def derive_leveldb_metrics(
     seek = subtract_number(end_counts, start_counts, "seek_comp")
 
     return {
-        "compacted_tables": subtract_number(end_compaction, start_compaction, "tables"),
-        "compacted_size_mb": subtract_number(end_compaction, start_compaction, "size_mb"),
+        # Tables and size describe the live LSM at the end checkpoint. Unlike
+        # compaction I/O/time, they are not cumulative work counters.
+        "sstable_count": end_compaction["tables"],
+        "sstable_size_mb": end_compaction["size_mb"],
         "compaction_time_seconds": subtract_number(
             end_compaction, start_compaction, "time_sec"
         ),
@@ -257,6 +262,11 @@ def normalized_case(case: dict[str, Any], report_target: int | None) -> dict[str
             or manifest.get("experiment_id")
         ),
         "scheme": case.get("scheme") or resolved.get("scheme") or manifest.get("scheme"),
+        "variant": (
+            case.get("variant") or resolved.get("variant") or manifest.get("variant")
+            # Older smoke reports may lack the explicit build variant.
+            or ("stats" if outputs.get("read_stats") else "fast")
+        ),
         "target_block": (
             case.get("target_block")
             or resolved.get("target_block")
@@ -292,10 +302,12 @@ def display(value: Any) -> str:
 
 def write_markdown(
     path: Path, start: int, end: int, leveldb_rows: list[dict[str, Any]],
-    read_rows: list[dict[str, Any]]
+    read_rows: list[dict[str, Any]], variant: str,
 ) -> None:
     lines = [
         "# Storage metrics",
+        "",
+        f"Measurement variant: {variant}",
         "",
         (
             f"Window: blocks {start:,}–{end:,}. Cache hit rates are percentages; "
@@ -315,6 +327,8 @@ def write_markdown(
                 **{key: display(value) for key, value in row.items()}
             )
         )
+    if not read_rows:
+        lines.extend(["", "Detailed read counters are unavailable in fast runs."])
     lines.extend(
         [
             "",
@@ -345,8 +359,18 @@ def write_metric_summaries(
     end_block: int,
     leveldb_rows: list[dict[str, Any]],
     read_rows: list[dict[str, Any]],
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    schemes = [display_scheme(row["scheme"]) for row in read_rows]
+    *,
+    variant: str | None = None,
+    start_block: int = 0,
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    # E3 can contain several configurations of the same scheme. Retain their
+    # case IDs instead of overwriting columns with identical scheme labels.
+    schemes = [
+        display_scheme(row["scheme"])
+        if sum(other["scheme"] == row["scheme"] for other in read_rows) == 1
+        else row["case_id"]
+        for row in read_rows
+    ]
     read_summary_rows = [
         {
             "metric": "Negative Lookups",
@@ -366,36 +390,44 @@ def write_metric_summaries(
     read_summary = {
         "title": (
             "Average number of negative lookups per read and cache hit rate "
-            f"through block {end_block}"
+            f"over blocks ({start_block}, {end_block}]"
         ),
+        "variant": variant,
         "columns": ["metric", *schemes],
         "rows": read_summary_rows,
-    }
-    with (output_dir / "read_path_summary.csv").open(
-        "w", newline="", encoding="utf-8"
-    ) as stream:
-        writer = csv.DictWriter(stream, fieldnames=read_summary["columns"])
-        writer.writeheader()
-        writer.writerows(read_summary_rows)
+    } if read_rows else None
+    read_summary_path = output_dir / "read_path_summary.csv"
+    if read_summary is not None:
+        with read_summary_path.open("w", newline="", encoding="utf-8") as stream:
+            writer = csv.DictWriter(stream, fieldnames=read_summary["columns"])
+            writer.writeheader()
+            writer.writerows(read_summary_rows)
+    else:
+        read_summary_path.unlink(missing_ok=True)
 
     compaction_summary_rows = []
-    for leveldb in leveldb_rows:
-        disk_size_bytes = leveldb.get("disk_size_bytes")
+    scheme_rank = {scheme: index for index, scheme in enumerate(TABLE3_SCHEME_ORDER)}
+    for leveldb in sorted(
+        leveldb_rows,
+        key=lambda row: scheme_rank.get(row["scheme"], len(scheme_rank)),
+    ):
         compaction_summary_rows.append(
             {
-                "Key": display_scheme(leveldb["scheme"]),
+                "Key": (
+                    display_scheme(leveldb["scheme"])
+                    if sum(row["scheme"] == leveldb["scheme"] for row in leveldb_rows) == 1
+                    else leveldb["case_id"]
+                ),
                 "Time (s)": leveldb["compaction_time_seconds"],
                 "Read (GB)": leveldb["compaction_read_mb"] / 1000,
                 "Write (GB)": leveldb["compaction_write_mb"] / 1000,
                 "Mem": leveldb["mem_compactions"],
                 "L0": leveldb["level0_compactions"],
                 "Non-L0": leveldb["non_level0_compactions"],
-                "# of SSTs": leveldb["opened_tables"],
-                "Size (GB)": (
-                    disk_size_bytes / 1_000_000_000
-                    if disk_size_bytes is not None
-                    else None
-                ),
+                "# of SSTs": leveldb["sstable_count"],
+                # Table 3 uses live SST bytes for every scheme. Whole-directory
+                # DiskSize also includes non-SST files, including P's history.
+                "Size (GB)": leveldb["sstable_size_mb"] / 1000,
             }
         )
     compaction_summary_columns = [
@@ -404,9 +436,15 @@ def write_metric_summaries(
     ]
     compaction_summary = {
         "title": (
-            "Comparison of LevelDB compaction metrics and storage sizes "
+            "Comparison of LevelDB compaction metrics and live SST sizes "
             f"at block {end_block}"
         ),
+        "variant": variant,
+        "size_definition": {
+            "source_field": "compaction.total.size_mb",
+            "calculation": "end-checkpoint size_mb / 1000",
+            "scope": "live SST files across all levels; excludes separate history, WAL and metadata files",
+        },
         "columns": compaction_summary_columns,
         "rows": compaction_summary_rows,
     }
@@ -420,12 +458,21 @@ def write_metric_summaries(
     lines = [
         "# Storage metric summaries",
         "",
-        f"## Read-path summary (through block {end_block:,})",
+        f"Measurement variant: {variant or 'unspecified'}",
         "",
-        "| Metric | " + " | ".join(schemes) + " |",
-        "|---|" + "|".join("---:" for _ in schemes) + "|",
+        f"Cumulative-counter window: ({start_block:,}, {end_block:,}].",
+        "",
+        "## Read-path summary",
+        "",
     ]
-    for row in read_summary_rows:
+    if read_rows:
+        lines.extend([
+            "| Metric | " + " | ".join(schemes) + " |",
+            "|---|" + "|".join("---:" for _ in schemes) + "|",
+        ])
+    else:
+        lines.append("Detailed read counters are unavailable in fast runs.")
+    for row in (read_summary_rows if read_rows else []):
         values = [
             (
                 f"{row[scheme]:.2f}"
@@ -441,6 +488,10 @@ def write_metric_summaries(
         [
             "",
             f"## Compaction/storage summary (at block {end_block:,})",
+            "",
+            "Size (GB) is the end-checkpoint live SST size summed over all levels. "
+            "It excludes separate history, WAL and metadata files for every scheme; "
+            "whole-directory disk_size_bytes remains a diagnostic in leveldb_metrics.csv.",
             "",
             "| Key | Time (s) | Read (GB) | Write (GB) | Mem | L0 | Non-L0 | # of SSTs | Size (GB) |",
             "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
@@ -474,15 +525,37 @@ def main() -> int:
     parser.add_argument("--start-block", type=int, default=0)
     parser.add_argument("--end-block", type=int)
     parser.add_argument("--output-dir", type=Path)
+    parser.add_argument(
+        "--variant", choices=("fast", "stats"),
+        help=("select fast for Table 3/write stalls or stats for Table 2/read metrics; "
+              "required when a report contains both variants"),
+    )
     args = parser.parse_args()
 
     report_path = args.report.resolve()
     report = load_json(report_path)
+    cases = [normalized_case(case, report.get("target_block")) for case in report["cases"]]
+    cases = [case for case in cases if case["simblocks"] and case["leveldb_stats"]]
+    if args.variant is not None:
+        cases = [case for case in cases if case["variant"] == args.variant]
+    if not cases:
+        raise SystemExit("the report contains no matching cases with simBlocks and LevelDB stats")
+    variants = {case["variant"] for case in cases}
+    if len(variants) != 1:
+        raise SystemExit(
+            "the report contains multiple measurement variants; select --variant stats "
+            "for Table 2/read metrics or --variant fast for Table 3/write stalls"
+        )
+    variant = variants.pop()
+    if variant not in ("fast", "stats"):
+        raise SystemExit(f"unsupported measurement variant: {variant}")
+    if variant == "stats":
+        for case in cases:
+            if not case["read_stats"]:
+                raise SystemExit(f"stats case {case['case_id']} is missing read_stats")
     end_block = args.end_block or report.get("target_block")
     if end_block is None:
-        targets = {
-            normalized_case(case, None)["target_block"] for case in report["cases"]
-        }
+        targets = {case["target_block"] for case in cases}
         if len(targets) != 1:
             raise SystemExit("--end-block is required when cases have different targets")
         end_block = targets.pop()
@@ -497,15 +570,11 @@ def main() -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
     leveldb_rows: list[dict[str, Any]] = []
     read_rows: list[dict[str, Any]] = []
-    provenance_rows: list[dict[str, Any]] = []
+    case_results: list[dict[str, Any]] = []
 
-    for original in report["cases"]:
-        case = normalized_case(original, report.get("target_block"))
-        if not case["simblocks"] or not case["leveldb_stats"] or not case["read_stats"]:
-            continue
+    for case in cases:
         simblocks_path = resolve_path(case["simblocks"])
         leveldb_path = resolve_path(case["leveldb_stats"])
-        read_final_path = resolve_path(case["read_stats"])
         leveldb_data = load_json(leveldb_path)
         end_leveldb = checkpoint(leveldb_data, end_block)
         start_leveldb = (
@@ -513,24 +582,28 @@ def main() -> int:
         )
         leveldb_metrics = derive_leveldb_metrics(end_leveldb, start_leveldb)
 
-        end_read_path = read_stats_checkpoint(
-            read_final_path, case["experiment_id"], end_block
-        )
-        start_read_path = (
-            read_stats_checkpoint(
-                read_final_path, case["experiment_id"], args.start_block
+        read_metrics = None
+        end_read_path = start_read_path = None
+        if variant == "stats":
+            read_final_path = resolve_path(case["read_stats"])
+            end_read_path = read_stats_checkpoint(
+                read_final_path, case["experiment_id"], end_block
             )
-            if args.start_block
-            else None
-        )
-        end_read = load_json(end_read_path)
-        start_read = load_json(start_read_path) if start_read_path else None
-        read_metrics = derive_read_metrics(subtract_read_stats(end_read, start_read))
+            start_read_path = (
+                read_stats_checkpoint(
+                    read_final_path, case["experiment_id"], args.start_block
+                )
+                if args.start_block else None
+            )
+            end_read = load_json(end_read_path)
+            start_read = load_json(start_read_path) if start_read_path else None
+            read_metrics = derive_read_metrics(subtract_read_stats(end_read, start_read))
         disk_size_bytes = simblock_checkpoint(simblocks_path, end_block).get("DiskSize")
         identity = {
             "case_id": case["case_id"],
             "experiment_id": case["experiment_id"],
             "scheme": case["scheme"],
+            "variant": variant,
             "start_block": args.start_block,
             "end_block": end_block,
             "database_bytes": (
@@ -541,86 +614,72 @@ def main() -> int:
             "disk_size_bytes": disk_size_bytes,
         }
         leveldb_rows.append(identity | leveldb_metrics)
-        read_rows.append(identity | read_metrics)
-        provenance_rows.append(
-            {
-                "leveldb_stats": {
-                    "path": portable_path(leveldb_path),
-                    "sha256": sha256_file(leveldb_path),
-                },
-                "simblocks": {
-                    "path": portable_path(simblocks_path),
-                    "checkpoint": end_block,
-                    "field": "DiskSize",
-                },
-                "end_read_stats": {
-                    "path": portable_path(end_read_path),
-                    "sha256": sha256_file(end_read_path),
-                },
-                "start_read_stats": (
-                    {
-                        "path": portable_path(start_read_path),
-                        "sha256": sha256_file(start_read_path),
-                    }
-                    if start_read_path
-                    else None
-                ),
-            }
-        )
-
-    if not leveldb_rows:
-        raise SystemExit("the report contains no cases with both LevelDB and read stats")
+        if read_metrics is not None:
+            read_rows.append(identity | read_metrics)
+        provenance = {
+            "leveldb_stats": {
+                "path": portable_path(leveldb_path),
+                "sha256": sha256_file(leveldb_path),
+            },
+            "simblocks": {
+                "path": portable_path(simblocks_path),
+                "checkpoint": end_block,
+                "field": "DiskSize",
+            },
+            "end_read_stats": {
+                "path": portable_path(end_read_path),
+                "sha256": sha256_file(end_read_path),
+            } if end_read_path else None,
+            "start_read_stats": (
+                {
+                    "path": portable_path(start_read_path),
+                    "sha256": sha256_file(start_read_path),
+                }
+                if start_read_path
+                else None
+            ),
+        }
+        case_results.append({
+            "case_id": case["case_id"],
+            "experiment_id": case["experiment_id"],
+            "scheme": case["scheme"],
+            "variant": variant,
+            "inputs": provenance,
+            "leveldb": leveldb_metrics,
+            "read": read_metrics,
+        })
 
     read_summary, compaction_summary = write_metric_summaries(
-        output_dir, end_block, leveldb_rows, read_rows
+        output_dir, end_block, leveldb_rows, read_rows,
+        variant=variant, start_block=args.start_block,
     )
     payload = {
         "source_report": portable_path(report_path),
         "source_report_sha256": sha256_file(report_path),
         "start_block": args.start_block,
         "end_block": end_block,
+        "variant": variant,
         "formula_reference": "docs/STORAGE_METRICS.md",
         "read_path_summary": read_summary,
         "compaction_storage_summary": compaction_summary,
-        "cases": [
-            {
-                "case_id": leveldb["case_id"],
-                "experiment_id": leveldb["experiment_id"],
-                "scheme": leveldb["scheme"],
-                "inputs": provenance,
-                "leveldb": {
-                    key: value for key, value in leveldb.items()
-                    if key not in {
-                        "case_id", "experiment_id", "scheme", "start_block",
-                        "end_block", "database_bytes", "disk_size_bytes",
-                    }
-                },
-                "read": {
-                    key: value for key, value in read.items()
-                    if key not in {
-                        "case_id", "experiment_id", "scheme", "start_block",
-                        "end_block", "database_bytes", "disk_size_bytes",
-                    }
-                },
-            }
-            for leveldb, read, provenance in zip(
-                leveldb_rows, read_rows, provenance_rows
-            )
-        ],
+        "cases": case_results,
     }
     (output_dir / "storage_metrics.json").write_text(
         json.dumps(payload, indent=2, allow_nan=False) + "\n", encoding="utf-8"
     )
     write_csv(output_dir / "leveldb_metrics.csv", leveldb_rows)
     write_csv(output_dir / "read_metrics.csv", read_rows)
+    if not read_rows:
+        (output_dir / "read_metrics.csv").unlink(missing_ok=True)
     write_markdown(
         output_dir / "storage_metrics.md",
         args.start_block,
         end_block,
         leveldb_rows,
         read_rows,
+        variant,
     )
-    print(f"Extracted {len(leveldb_rows)} cases for blocks {args.start_block}–{end_block}")
+    print(f"Extracted {len(leveldb_rows)} {variant} cases for blocks {args.start_block}–{end_block}")
     print(f"Output: {output_dir}")
     return 0
 

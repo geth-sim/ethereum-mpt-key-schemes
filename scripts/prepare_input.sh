@@ -8,8 +8,7 @@ require_command jq
 require_command sha256sum
 [[ -x "$BIN_DIR/geth" ]] || die "geth is not built; run ./scripts/build.sh first"
 
-# Every reduced profile shares the pinned 1M input. An explicitly requested
-# larger target (for example the paper range) raises the acquisition endpoint.
+# Acquire the requested target, or a larger explicitly configured input prefix.
 acquire_block="$INPUT_TARGET_BLOCK"
 acquire_hash="$INPUT_TARGET_HASH"
 if ((TARGET_BLOCK > acquire_block)); then
